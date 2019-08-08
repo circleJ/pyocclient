@@ -230,6 +230,7 @@ class FileInfo(object):
         :returns: name of the file
         """
         return self.path
+    
     def get_context(self):
         return self.path ,self.file_type,self.attributes
 
@@ -338,9 +339,11 @@ class Client(object):
         url_components = parse.urlparse(url)
         self._davpath = url_components.path + 'remote.php/webdav'
         self._webdav_url = url + 'remote.php/webdav'
-        #定义上传文件总大小
+        
+        #
         self.sumfile_size = 0
-        #定义当前数据上传了多少大小
+        
+        #
         self.current_upload_size = 0
 
     def login(self, user_id, password):
@@ -556,13 +559,14 @@ class Client(object):
             gathered_files.append(
                 (path, basedir + path[len(local_directory):], files)
             )
-        #获取所有文件大小总和
+        
+        #
         for path, remote_path, files in gathered_files:
             remote_path = '/'.join(remote_path.split('\\'))
             for name in files:
                 file_local_path = path + '\\' + name
                 self.sumfile_size += os.path.getsize(file_local_path)
-        #上传操作
+        
         for path, remote_path, files in gathered_files:
             remote_path = '/'.join(remote_path.split('\\'))
             self.mkdir(target_path + remote_path + '/')
@@ -592,7 +596,6 @@ class Client(object):
             remote_path += os.path.basename(local_source_file)
 
         stat_result = os.stat(local_source_file)
-       # print(local_source_file)
         file_handle = open(local_source_file, 'rb', 8192)
         file_handle.seek(0, os.SEEK_END)
         size = file_handle.tell()
@@ -633,9 +636,9 @@ class Client(object):
                 result = False
                 break
             else:
-                #获取每次上传的数据大小
+                #
                 data_size = sys.getsizeof(data)
-                #每个chunk上传的data大小，都会多33B，所以要和获取的本地文件大小对比需要每次chunk减去33
+                #
                 self.set_upload_progress(data_size - 33)
         file_handle.close()
         return result
