@@ -12,7 +12,7 @@ import datetime
 import time
 import requests
 import xml.etree.ElementTree as ET
-import os
+import os,sys
 import math
 import six
 from six.moves.urllib import parse
@@ -229,7 +229,9 @@ class FileInfo(object):
 
         :returns: name of the file
         """
-        return self.name
+        return self.path
+    def get_context(self):
+        return self.path ,self.file_type,self.attributes
 
     def get_path(self):
         """Returns the full path to the file without name and without
@@ -320,8 +322,6 @@ class Client(object):
 
         :param url: URL of the target ownCloud instance
         :param verify_certs: True (default) to verify SSL certificates, False otherwise
-        :param dav_endpoint_version: None (default) to force using a specific endpoint version
-        instead of relying on capabilities
         :param debug: set to True to print debugging messages to stdout, defaults to False
         """
         if not url.endswith('/'):
@@ -331,10 +331,17 @@ class Client(object):
         self._session = None
         self._debug = kwargs.get('debug', False)
         self._verify_certs = kwargs.get('verify_certs', True)
-        self._dav_endpoint_version = kwargs.get('dav_endpoint_version', True)
 
         self._capabilities = None
         self._version = None
+
+        url_components = parse.urlparse(url)
+        self._davpath = url_components.path + 'remote.php/webdav'
+        self._webdav_url = url + 'remote.php/webdav'
+        #定义上传文件总大小
+        self.sumfile_size = 0
+        #定义当前数据上传了多少大小
+        self.current_upload_size = 0
 
     def login(self, user_id, password):
         """Authenticate to ownCloud.
@@ -351,15 +358,6 @@ class Client(object):
 
         try:
             self._update_capabilities()
-
-            url_components = parse.urlparse(self.url)
-            if self._dav_endpoint_version == 1:
-                self._davpath = url_components.path + 'remote.php/dav/files/' + parse.quote(user_id)
-                self._webdav_url = self.url + 'remote.php/dav/files/' + parse.quote(user_id)
-            else:
-                self._davpath = url_components.path + 'remote.php/webdav'
-                self._webdav_url = self.url + 'remote.php/webdav'
-
         except HTTPResponseError as e:
             self._session.close()
             self._session = None
@@ -509,6 +507,7 @@ class Client(object):
         :raises: HTTPResponseError in case an HTTP error status was returned
         """
         if kwargs.get('chunked', True):
+            #print('chunk')
             return self._put_file_chunked(
                 remote_path,
                 local_source_file,
@@ -519,7 +518,7 @@ class Client(object):
 
         headers = {}
         if kwargs.get('keep_mtime', True):
-            headers['X-OC-MTIME'] = str(int(stat_result.st_mtime))
+            headers['X-OC-MTIME'] = str(stat_result.st_mtime)
 
         if remote_path[-1] == '/':
             remote_path += os.path.basename(local_source_file)
@@ -542,10 +541,11 @@ class Client(object):
         :returns: True if the operation succeeded, False otherwise
         :raises: HTTPResponseError in case an HTTP error status was returned
         """
-        target_path = self._normalize_path(target_path)
+
         if not target_path.endswith('/'):
             target_path += '/'
         gathered_files = []
+
 
         if not local_directory.endswith('/'):
             local_directory += '/'
@@ -556,8 +556,15 @@ class Client(object):
             gathered_files.append(
                 (path, basedir + path[len(local_directory):], files)
             )
-
+        #获取所有文件大小总和
         for path, remote_path, files in gathered_files:
+            remote_path = '/'.join(remote_path.split('\\'))
+            for name in files:
+                file_local_path = path + '\\' + name
+                self.sumfile_size += os.path.getsize(file_local_path)
+        #上传操作
+        for path, remote_path, files in gathered_files:
+            remote_path = '/'.join(remote_path.split('\\'))
             self.mkdir(target_path + remote_path + '/')
             for name in files:
                 if not self.put_file(target_path + remote_path + '/',
@@ -576,7 +583,7 @@ class Client(object):
         :returns: True if the operation succeeded, False otherwise
         :raises: HTTPResponseError in case an HTTP error status was returned
         """
-        chunk_size = kwargs.get('chunk_size', 10 * 1024 * 1024)
+        chunk_size = kwargs.get('chunk_size', 5 * 1024 * 1024)
         result = True
         transfer_id = int(time.time())
 
@@ -585,7 +592,7 @@ class Client(object):
             remote_path += os.path.basename(local_source_file)
 
         stat_result = os.stat(local_source_file)
-
+       # print(local_source_file)
         file_handle = open(local_source_file, 'rb', 8192)
         file_handle.seek(0, os.SEEK_END)
         size = file_handle.tell()
@@ -593,7 +600,7 @@ class Client(object):
 
         headers = {}
         if kwargs.get('keep_mtime', True):
-            headers['X-OC-MTIME'] = str(int(stat_result.st_mtime))
+            headers['X-OC-MTIME'] = str(stat_result.st_mtime)
 
         if size == 0:
             return self._make_dav_request(
@@ -607,7 +614,7 @@ class Client(object):
 
         if chunk_count > 1:
             headers['OC-CHUNKED'] = '1'
-
+        finish_count = 1
         for chunk_index in range(0, int(chunk_count)):
             data = file_handle.read(chunk_size)
             if chunk_count > 1:
@@ -625,10 +632,26 @@ class Client(object):
             ):
                 result = False
                 break
-
+            else:
+                #获取每次上传的数据大小
+                data_size = sys.getsizeof(data)
+                #每个chunk上传的data大小，都会多33B，所以要和获取的本地文件大小对比需要每次chunk减去33
+                self.set_upload_progress(data_size - 33)
         file_handle.close()
         return result
 
+    """by circle"""
+    def set_upload_progress(self,data_size):
+        """set upload progress"""
+        self.current_upload_size += data_size
+        #print(self.get_upload_progress())
+    """by circle"""
+    def get_upload_progress(self):
+        '''get upload progress'''
+        if self.sumfile_size == 0:
+            return ' first 100%'
+        ret = '{:.0%}'.format(self.current_upload_size/self.sumfile_size)
+        return ret
     def mkdir(self, path):
         """Creates a remote directory
 
@@ -1010,14 +1033,10 @@ class Client(object):
         :raises: HTTPResponseError in case an HTTP error status was returned
 
         """
-        action_path = 'users'
-        if user_name:
-            action_path += '?search={}'.format(user_name)
-
         res = self._make_ocs_request(
             'GET',
             self.OCS_SERVICE_CLOUD,
-            action_path
+            'users?search=' + user_name
         )
 
         if res.status_code == 200:
@@ -1027,16 +1046,6 @@ class Client(object):
             return users
 
         raise HTTPResponseError(res)
-
-    def get_users(self):
-        """Get users via provisioning API.
-        If you get back an error 999, then the provisioning API is not enabled.
-
-        :returns: list of usernames
-        :raises: HTTPResponseError in case an HTTP error status was returned
-
-        """
-        return self.search_users('')
 
     def set_user_attribute(self, user_name, key, value):
         """Sets a user attribute
@@ -1234,8 +1243,6 @@ class Client(object):
         :param perms (optional): permissions of the shared object
             defaults to read only (1)
             http://doc.owncloud.org/server/6.0/admin_manual/sharing_api/index.html
-        :param remote_user (optional): True if it is a federated users
-            defaults to False if it is a local user
         :returns: instance of :class:`ShareInfo` with the share info
             or False if the operation failed
         :raises: HTTPResponseError in case an HTTP error status was returned
@@ -1246,8 +1253,6 @@ class Client(object):
                 or ((not isinstance(user, six.string_types)) or (user == ''))):
             return False
 
-        if remote_user and (not user.endswith('/')):
-            user = user + '/'
         path = self._normalize_path(path)
         post_data = {
             'shareType': self.OCS_SHARE_TYPE_REMOTE if remote_user else
@@ -1322,50 +1327,6 @@ class Client(object):
         # We get 200 when the group was just deleted.
         if res.status_code == 200:
             return True
-
-        raise HTTPResponseError(res)
-
-    def get_groups(self):
-        """Get groups via provisioning API.
-        If you get back an error 999, then the provisioning API is not enabled.
-
-        :returns: list of groups
-        :raises: HTTPResponseError in case an HTTP error status was returned
-
-        """
-        res = self._make_ocs_request(
-            'GET',
-            self.OCS_SERVICE_CLOUD,
-            'groups'
-        )
-
-        if res.status_code == 200:
-            tree = ET.fromstring(res.content)
-            groups = [x.text for x in tree.findall('data/groups/element')]
-
-            return groups
-
-        raise HTTPResponseError(res)
-
-    def get_group_members(self, group_name):
-        """Get group members via provisioning API.
-        If you get back an error 999, then the provisioning API is not enabled.
-
-        :param group_name:  name of group to list members
-        :returns: list of group members
-        :raises: HTTPResponseError in case an HTTP error status was returned
-
-        """
-        res = self._make_ocs_request(
-            'GET',
-            self.OCS_SERVICE_CLOUD,
-            'groups/' + group_name
-        )
-
-        if res.status_code == 200:
-            tree = ET.fromstring(res.content)
-            self._check_ocs_status(tree, [100])
-            return [group.text for group in tree.find('data/users')]
 
         raise HTTPResponseError(res)
 
@@ -1883,16 +1844,6 @@ class Client(object):
             self._version = version_el.text
             if edition_el.text is not None:
                 self._version += '-' + edition_el.text
-
-            if 'dav' in apps and 'chunking' in apps['dav']:
-                chunking_version = float(apps['dav']['chunking'])
-                if self._dav_endpoint_version > chunking_version:
-                    self._dav_endpoint_version = None
-
-                if self._dav_endpoint_version is None and chunking_version >= 1.0:
-                    self._dav_endpoint_version = 1
-                else:
-                    self._dav_endpoint_version = 0
 
             return self._capabilities
         raise HTTPResponseError(res)
